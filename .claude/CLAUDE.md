@@ -1,72 +1,51 @@
-# Auto Research Pipeline
+# KDD Cup 2026: Data Agent
 
-Automated research pipeline that runs daily via ECS Fargate, executes research prompts using Claude CLI, and delivers results as GitHub Pull Requests with Slack/email notifications.
+KDD Cup 2026 参戦プロジェクト。DataAgent-Bench に対して自律的に多段階推論を実行し、正確な回答を導出するデータエージェントを開発する。
 
 ## Architecture
 
 ```
-EventBridge Scheduler (cron: JST 09:00)
-  ↓ RunTask
-ECS Fargate Task (Private Subnet)
-  ├── Claude CLI (claude -p) — research execution
-  ├── git clone/push — branch & commit
-  ├── gh pr create — Pull Request creation
-  └── Slack/Email notification
-  ↕ mount
-EFS (/claude-config) — Claude CLI auth persistence
-
-External:
-  Secrets Manager — GitHub App key, Slack Webhook
-  ECR — Docker image (auto-research-task)
-  CloudWatch Logs — /ecs/auto-research
+Natural Language Question
+  ↓
+Planner (質問分解・実行計画生成)
+  ↓
+Executor (ツール選択・実行)
+  ├── Python Script — データ処理・集計
+  ├── SQL Query — DB問い合わせ (DuckDB/SQLite)
+  ├── Document Parser — PDF/DOCX/JSON読み取り
+  └── Image Analyzer — PNG/チャート解析
+  ↓
+Reasoner (中間結果の推論・統合)
+  ↓
+Integrator (最終回答の合成)
 ```
 
 ## Technology Stack
 
-- **Backend**: Python 3.12+, PyYAML, PyJWT, Requests, Boto3, fpdf2, Markdown
-- **Container**: Docker (node:22-bookworm-slim base), Claude CLI, gh CLI, UV
-- **Infrastructure**: AWS (ECS Fargate, EFS, ECR, EventBridge Scheduler, Secrets Manager, CloudWatch), Terraform
-- **CI/CD**: GitHub Actions (ci-backend.yml)
-- **Auth**: GitHub App (JWT → installation token)
+- **Language**: Python 3.12+
+- **AI**: Claude API / Claude CLI
+- **Data Processing**: Pandas, DuckDB/SQLite, Pillow
+- **Document Processing**: PyPDF2, python-docx, PyYAML
 - **Testing**: Pytest + pytest-cov, Ruff, Mypy
-- **Package Management**: UV (Python)
+- **Package Management**: UV
 
 ## Folder Structure
 
 ```
+pipeline/
+  case1/                     分析ケース1
+    eda/                     探索的データ分析
+  case2/                     分析ケース2（以降同様）
 backend/
-  Dockerfile               Fargate task Docker image
-  pyproject.toml            Python dependencies (UV managed)
-  uv.lock                   Lock file
-  src/
-    main.py                 Entrypoint: orchestrates full pipeline
-    config.py               YAML config + env var loading
-    research_runner.py       Claude CLI execution logic
-    git_manager.py           git clone/branch/commit/push operations
-    github_auth.py           GitHub App auth (JWT → token)
-    pr_creator.py            gh CLI PR creation
-    email_notifier.py        Email notification (SES/SMTP)
-  config/
-    research-config.yaml     Research settings (prompt path, output dir, branch prefix)
-  scripts/
-    entrypoint.sh            Container entrypoint (EFS link, GitHub auth, main.py)
+  pyproject.toml             Python dependencies (UV managed)
+  uv.lock                    Lock file
+  src/                       共通ライブラリ・ユーティリティ
   tests/                     Pytest unit tests
 infra/
   main.tf                    Root module (provider, backend)
   variables.tf               Input variables
   outputs.tf                 Output values
-  terraform.tfvars.example   Sample tfvars
-  modules/
-    networking/              VPC, subnets, NAT gateway
-    efs/                     EFS file system, access point
-    ecr/                     ECR repository
-    ecs/                     ECS cluster, task definition, IAM roles
-    scheduler/               EventBridge Scheduler
-    secrets/                 Secrets Manager
-    monitoring/              CloudWatch Logs
-    cicd/                    CI/CD pipeline resources
-  scripts/
-    init-efs.sh              EFS initial setup (Claude CLI login)
+  modules/                   Terraform modules
 dev/                         Development scripts
   setup                      Install dependencies (uv sync)
   format                     Code formatting (ruff)
@@ -92,20 +71,22 @@ dev/create-worktree  # Create git worktree with .env copy
 
 | Term | Description |
 |------|-------------|
-| Research Prompt | Markdown file defining research topic, executed by Claude CLI |
-| Research Runner | Module that executes `claude -p` with prompt file |
-| GitHub App | Authentication mechanism for git push and PR creation |
-| EFS | Elastic File System, persists Claude CLI auth across Fargate tasks |
-| EventBridge Scheduler | AWS service for cron-based Fargate task scheduling |
+| DataAgent-Bench | KDD Cup 2026公式ベンチマーク。異種データパッケージ + 自然言語質問 |
+| Data Package | CSV, JSON, SQLite, PDF, PNG, DOCX等を含むデータセット |
+| Reasoning Topology | 推論の構造パターン（逐次チェーン、分岐・統合、反復ループ） |
+| Column Matching | 評価方式。予測が全正答列を完全一致で網羅した場合のみスコア1 |
+| Planner | 質問を多段階実行計画へ分解するモジュール |
+| Executor | Python, SQL, API等のツールを選択・実行するモジュール |
+| Reasoner | 中間結果を推論・統合するモジュール |
 
 ## Rules
 
 | Rule file | Auto-loaded for | When to read manually |
 |-----------|----------------|----------------------|
-| `.claude/rules/backend.md` | `backend/**` | Python code changes, Dockerfile edits, pytest, ruff/mypy configuration |
+| `.claude/rules/backend.md` | `backend/**` | Python code changes, pytest, ruff/mypy configuration |
+| `.claude/rules/pipeline.md` | `pipeline/**` | 分析パイプライン、ケース別データ処理、推論ロジック |
 | `.claude/rules/infra.md` | `infra/**` | Terraform changes, AWS resource design, module structure decisions |
-| `.claude/rules/frontend.md` | `frontend/**` | Not applicable to this project (legacy, from previous AI Reception project) |
-| `.claude/rules/security.md` | Always loaded | Commits, secret handling, IAM design, network security, CI/CD pipeline changes |
+| `.claude/rules/security.md` | Always loaded | Commits, secret handling, CI/CD pipeline changes |
 
 ## Response Language
 

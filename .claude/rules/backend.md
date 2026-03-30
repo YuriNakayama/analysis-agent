@@ -20,45 +20,26 @@ paths:
 - 200-400 lines per file typical, 800 max
 - NEVER mutate objects — always create new instances
 
-## Clean Architecture
+## Module Architecture
 
-This project follows Clean Architecture with clear layer separation:
+データエージェントの共通ライブラリとして以下のモジュール構成を想定:
 
 ```
-presentation/    → HTTP API layer (FastAPI routers, Pydantic models)
-application/     → Business logic and use cases
-domain/          → Core domain models and prompt templates
-infrastructure/  → External integrations (Cognito, Bedrock, DynamoDB, OpenAI)
-core/            → Cross-cutting concerns (logging, security, config)
+backend/src/
+  planner/         質問分解・実行計画生成
+  executor/        ツール選択・実行（Python, SQL, API）
+  reasoner/        中間結果の推論・統合
+  integrator/      最終回答の合成
+  parsers/         データパーサー（CSV, JSON, PDF, DOCX, PNG）
+  utils/           共通ユーティリティ
 ```
 
-### Layer Rules
+### モジュール設計原則
 
-- **presentation** depends on **application** only
-- **application** depends on **domain** only
-- **domain** has no dependencies on other layers
-- **infrastructure** implements interfaces defined in **domain** or **application**
-- **core** is shared across all layers
-
-### Dependency Injection
-
-Use FastAPI's dependency injection to wire layers together:
-
-```python
-from fastapi import Depends
-
-async def get_session_service(
-    db: Database = Depends(get_database),
-) -> SessionService:
-    return SessionService(db)
-
-@router.get("/sessions/{session_id}")
-async def get_session(
-    session_id: str,
-    service: SessionService = Depends(get_session_service),
-) -> SessionResponse:
-    return await service.get(session_id)
-```
+- 各モジュールは単一責任を持つ
+- モジュール間の依存は明示的にインポートで表現
+- パーサーはデータ形式ごとに独立して実装
+- 共通インターフェースを定義し、拡張可能に設計
 
 ## Type Hints & Naming
 
@@ -77,25 +58,24 @@ def get_user(user_id) -> Any:
     ...
 ```
 
-## FastAPI Conventions
+## Data Processing Conventions
 
-- Utilize dependency injection for all services
-- Define requests/responses with Pydantic models in `presentation/model/`
-- Implement unified error handling
-- Route handlers in `presentation/endpoint/`
+- DataFrameの操作はメソッドチェーンを活用し、中間変数を減らす
+- SQLクエリはパラメータ化して実行（SQLインジェクション防止）
+- 大規模データはチャンク処理でメモリ効率を確保
+- ファイルパスは `pathlib.Path` を使用
 
 ```python
-from pydantic import BaseModel
+# GOOD: パラメータ化クエリ
+import duckdb
 
-class CreateSessionRequest(BaseModel):
-    agent_id: str
-    user_id: str
+conn = duckdb.connect(db_path)
+result = conn.execute(
+    "SELECT * FROM sales WHERE region = ?", [region]
+).fetchdf()
 
-class SessionResponse(BaseModel):
-    id: str
-    agent_id: str
-    status: str
-    created_at: datetime
+# BAD: 文字列結合
+result = conn.execute(f"SELECT * FROM sales WHERE region = '{region}'").fetchdf()
 ```
 
 ## Async & Error Handling
@@ -107,52 +87,24 @@ class SessionResponse(BaseModel):
 - Use exception chaining (`raise ... from e`)
 
 ```python
-class SessionNotFoundError(Exception):
-    def __init__(self, session_id: str) -> None:
-        super().__init__(f"Session not found: {session_id}")
-        self.session_id = session_id
+class DataParseError(Exception):
+    def __init__(self, file_path: str, reason: str) -> None:
+        super().__init__(f"Failed to parse {file_path}: {reason}")
+        self.file_path = file_path
 
-async def get_session(session_id: str) -> Session:
+async def parse_data(file_path: str) -> DataFrame:
     try:
-        return await db.find_session(session_id)
-    except DatabaseError as e:
-        logger.error("Failed to fetch session", session_id=session_id, error=str(e))
-        raise SessionNotFoundError(session_id) from e
-```
-
-## Input Validation
-
-Validate at system boundaries using Pydantic:
-
-```python
-from pydantic import BaseModel, EmailStr, field_validator
-
-class RegisterRequest(BaseModel):
-    email: EmailStr
-    name: str
-
-    @field_validator("name")
-    @classmethod
-    def name_must_not_be_empty(cls, v: str) -> str:
-        if not v.strip():
-            raise ValueError("Name must not be empty")
-        return v.strip()
+        return await _read_file(file_path)
+    except FileNotFoundError as e:
+        raise DataParseError(file_path, "file not found") from e
 ```
 
 ## Logging
 
 - Use structured logging with JSON format
 - Exclude sensitive information (tokens, passwords, PII)
-- Use `src.core.log.get_logger()` instead of `print()`
-
-```python
-from src.core.log import get_logger
-
-logger = get_logger(__name__)
-
-logger.info("Session created", session_id=session.id, user_id=user.id)
-# NEVER: logger.info(f"Token: {token}")
-```
+- Use `logging.getLogger(__name__)` or project logger
+- NEVER use `print()` for logging
 
 ## Lint/Formatting
 
@@ -167,7 +119,6 @@ uv run mypy .
 ### Frameworks
 
 - **Unit/Integration**: Pytest + pytest-asyncio
-- **AWS Mocking**: moto (for Cognito, DynamoDB, etc.)
 - Tests mirror `src/` structure in `backend/tests/`
 
 ### Test Guidelines
@@ -176,53 +127,28 @@ uv run mypy .
 - Use Fixtures for common setup
 - Minimize use of mock and patch — keep close to actual behavior
 - Each test should be executable independently
-- Use moto for AWS service mocking instead of manual mocks
+- データパーサーのテストにはサンプルデータファイルを `tests/fixtures/` に配置
 
 ```python
 import pytest
-from moto import mock_aws
+from pathlib import Path
 
 @pytest.fixture
-def dynamodb_table():
-    with mock_aws():
-        # Arrange: create table
-        client = boto3.client("dynamodb", region_name="ap-northeast-1")
-        client.create_table(
-            TableName="sessions",
-            KeySchema=[{"AttributeName": "id", "KeyType": "HASH"}],
-            AttributeDefinitions=[{"AttributeName": "id", "AttributeType": "S"}],
-            BillingMode="PAY_PER_REQUEST",
-        )
-        yield client
+def sample_csv(tmp_path: Path) -> Path:
+    csv_file = tmp_path / "sales.csv"
+    csv_file.write_text("region,amount\neast,100\nwest,200\n")
+    return csv_file
 
-async def test_create_session(dynamodb_table):
+def test_parse_csv(sample_csv: Path):
     # Arrange
-    service = SessionService(DynamoDBDatabase(dynamodb_table))
-    request = CreateSessionRequest(agent_id="agent-1", user_id="user-1")
+    parser = CsvParser()
 
     # Act
-    session = await service.create(request)
+    result = parser.parse(sample_csv)
 
     # Assert
-    assert session.agent_id == "agent-1"
-    assert session.status == "active"
-```
-
-### Async Test Pattern
-
-```python
-import pytest
-
-@pytest.mark.asyncio
-async def test_realtime_connection():
-    # Arrange
-    client = RealtimeClient(api_key="test-key")
-
-    # Act
-    result = await client.connect()
-
-    # Assert
-    assert result.status == "connected"
+    assert len(result) == 2
+    assert result.columns.tolist() == ["region", "amount"]
 ```
 
 ### Test-Driven Development
@@ -242,5 +168,5 @@ async def test_realtime_connection():
 - [ ] No hardcoded values
 - [ ] No mutation (immutable patterns used)
 - [ ] Type hints for all functions (no `Any`)
-- [ ] Pydantic validation at system boundaries
+- [ ] SQL queries are parameterized
 - [ ] `ruff format`, `ruff check`, `mypy` pass
